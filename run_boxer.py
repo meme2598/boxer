@@ -39,6 +39,40 @@ from utils.tw.tensor_utils import (
 from utils.video import make_mp4, safe_delete_folder
 
 
+def _is_remove360(input_path: str) -> bool:
+    """Return True if input_path looks like a Remove360 sequence directory."""
+    # Bare name like "bedroom_table" that resolves to sample_data/remove360/...
+    candidate = input_path
+    if not os.path.isabs(candidate) and not os.path.exists(candidate):
+        candidate = os.path.join(SAMPLE_DATA_PATH, "remove360", input_path)
+    if os.path.exists(os.path.join(candidate, "sparse")):
+        return True
+    if os.path.exists(os.path.join(candidate, "images")) and os.path.exists(
+        os.path.join(candidate, "sparse")
+    ):
+        return True
+    # Absolute or relative path that contains sparse/
+    if os.path.exists(input_path) and os.path.isdir(input_path):
+        if os.path.exists(os.path.join(input_path, "sparse")):
+            return True
+    return False
+
+
+def _resolve_remove360_path(input_path: str) -> str:
+    """Resolve a Remove360 sequence path, searching sample_data/remove360/ if needed."""
+    if os.path.isabs(input_path) and os.path.exists(input_path):
+        return input_path
+    if os.path.exists(input_path):
+        return os.path.abspath(input_path)
+    candidate = os.path.join(SAMPLE_DATA_PATH, "remove360", input_path)
+    if os.path.exists(candidate):
+        return candidate
+    raise FileNotFoundError(
+        f"Remove360 sequence not found: {input_path}. "
+        f"Run scripts/download_remove360.py and scripts/run_colmap.sh first."
+    )
+
+
 def jet_color(val):
     """Map a scalar in [0, 1] to an RGB tuple via OpenCV's JET colormap."""
     val = max(0.0, min(1.0, float(val)))
@@ -109,6 +143,9 @@ def main():
     parser.add_argument("--no_csv", action="store_true", help="skip CSV writing")
     parser.add_argument("--force_cpu", action="store_true", help="force CPU")
     parser.add_argument("--gt2d", action="store_true", help="use GT pseudo 2DBB as input")
+    parser.add_argument("--bb2d_pad", type=float, default=0.0, help="fractional padding added to OWL 2D boxes before BoxerNet lifting (symmetric, e.g. 0.15 = +15%% on each side)")
+    parser.add_argument("--bb2d_pad_x", type=float, default=None, help="override --bb2d_pad for horizontal padding (e.g. 0.4 = +40%% width on each side)")
+    parser.add_argument("--bb2d_pad_y", type=float, default=None, help="override --bb2d_pad for vertical padding")
     parser.add_argument("--fuse", action="store_true", help="run offline 3D box fusion after processing")
     parser.add_argument("--track", action="store_true", help="run online 3D box tracking and show tracked boxes in Top Down View")
     parser.add_argument("--ckpt", type=str, default=os.path.join(CKPT_PATH, DEFAULT_BOXERNET_CKPT), help="path to BoxerNet checkpoint")
@@ -149,6 +186,10 @@ def main():
     elif args.input.startswith("ca1m"):
         dataset_type = "ca1m"
         seq_name = args.input
+    elif _is_remove360(args.input):
+        dataset_type = "remove360"
+        seq_dir = _resolve_remove360_path(args.input)
+        seq_name = os.path.basename(seq_dir.rstrip("/"))
     else:
         dataset_type = "aria"
         remote_root = args.input
@@ -232,6 +273,16 @@ def main():
             skip_frames=args.skip_n,
             max_frames=args.max_n,
             resize=(args.detector_hw, args.detector_hw),
+        )
+    elif dataset_type == "remove360":
+        from loaders.remove360_loader import Remove360Loader
+
+        print(f"==> Loading Remove360 sequence: {seq_dir}")
+        loader = Remove360Loader(
+            seq_dir=seq_dir,
+            skip_frames=args.skip_n,
+            max_frames=args.max_n,
+            start_frame=args.start_n - 1,
         )
     else:
         from loaders.aria_loader import AriaLoader
@@ -486,6 +537,20 @@ def main():
                 resize_to_HW=(args.detector_hw, args.detector_hw),
             )
             labels2d = [text_labels[label_int] for label_int in label_ints]
+
+            # Pad OWL boxes so BoxerNet lifts a wider 3D box (helps with
+            # rear-wheel-style tail extents OWL misses). Format: [x1,x2,y1,y2].
+            pad_x = args.bb2d_pad_x if args.bb2d_pad_x is not None else args.bb2d_pad
+            pad_y = args.bb2d_pad_y if args.bb2d_pad_y is not None else args.bb2d_pad
+            if (pad_x > 0 or pad_y > 0) and bb2d.shape[0] > 0:
+                W = float(img_torch.shape[3])
+                H = float(img_torch.shape[2])
+                w = bb2d[:, 1] - bb2d[:, 0]
+                h = bb2d[:, 3] - bb2d[:, 2]
+                bb2d[:, 0] = (bb2d[:, 0] - pad_x * w).clamp(min=0)
+                bb2d[:, 1] = (bb2d[:, 1] + pad_x * w).clamp(max=W)
+                bb2d[:, 2] = (bb2d[:, 2] - pad_y * h).clamp(min=0)
+                bb2d[:, 3] = (bb2d[:, 3] + pad_y * h).clamp(max=H)
 
         t_owl = timer.stop("owl")
 
