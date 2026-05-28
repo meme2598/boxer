@@ -221,8 +221,12 @@ def main():
         if args.fuse:
             from utils.fuse_3d_boxes import fuse_obbs_from_csv
 
-            print(f"\n==> Running fusion on {csv_path}")
-            fuse_obbs_from_csv(csv_path)
+            print(f"\n==> Running fusion on {csv_path} (conf_threshold={args.thresh3d})")
+            fuse_obbs_from_csv(
+                csv_path,
+                conf_threshold=args.thresh3d,
+                min_detections=2,
+            )
 
         if os.path.exists(csv2d_out_path):
             print(f"==> 2D BB CSV exists: {csv2d_out_path}")
@@ -847,8 +851,12 @@ def main():
     if args.fuse:
         from utils.fuse_3d_boxes import fuse_obbs_from_csv
 
-        print(f"\n==> Running fusion on {csv_path}")
-        fuse_obbs_from_csv(csv_path)
+        print(f"\n==> Running fusion on {csv_path} (conf_threshold={args.thresh3d})")
+        fuse_obbs_from_csv(
+            csv_path,
+            conf_threshold=args.thresh3d,
+            min_detections=2,
+        )
 
     if tracker is not None:
         active_tracks = tracker._get_active_tracks()
