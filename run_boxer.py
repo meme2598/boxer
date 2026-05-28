@@ -143,7 +143,9 @@ def main():
     parser.add_argument("--no_csv", action="store_true", help="skip CSV writing")
     parser.add_argument("--force_cpu", action="store_true", help="force CPU")
     parser.add_argument("--gt2d", action="store_true", help="use GT pseudo 2DBB as input")
-    parser.add_argument("--bb2d_pad", type=float, default=0.0, help="fractional padding added to OWL 2D boxes before BoxerNet lifting (e.g. 0.15 = +15%% on each side)")
+    parser.add_argument("--bb2d_pad", type=float, default=0.0, help="fractional padding added to OWL 2D boxes before BoxerNet lifting (symmetric, e.g. 0.15 = +15%% on each side)")
+    parser.add_argument("--bb2d_pad_x", type=float, default=None, help="override --bb2d_pad for horizontal padding (e.g. 0.4 = +40%% width on each side)")
+    parser.add_argument("--bb2d_pad_y", type=float, default=None, help="override --bb2d_pad for vertical padding")
     parser.add_argument("--fuse", action="store_true", help="run offline 3D box fusion after processing")
     parser.add_argument("--track", action="store_true", help="run online 3D box tracking and show tracked boxes in Top Down View")
     parser.add_argument("--ckpt", type=str, default=os.path.join(CKPT_PATH, DEFAULT_BOXERNET_CKPT), help="path to BoxerNet checkpoint")
@@ -538,15 +540,17 @@ def main():
 
             # Pad OWL boxes so BoxerNet lifts a wider 3D box (helps with
             # rear-wheel-style tail extents OWL misses). Format: [x1,x2,y1,y2].
-            if args.bb2d_pad > 0 and bb2d.shape[0] > 0:
+            pad_x = args.bb2d_pad_x if args.bb2d_pad_x is not None else args.bb2d_pad
+            pad_y = args.bb2d_pad_y if args.bb2d_pad_y is not None else args.bb2d_pad
+            if (pad_x > 0 or pad_y > 0) and bb2d.shape[0] > 0:
                 W = float(img_torch.shape[3])
                 H = float(img_torch.shape[2])
                 w = bb2d[:, 1] - bb2d[:, 0]
                 h = bb2d[:, 3] - bb2d[:, 2]
-                bb2d[:, 0] = (bb2d[:, 0] - args.bb2d_pad * w).clamp(min=0)
-                bb2d[:, 1] = (bb2d[:, 1] + args.bb2d_pad * w).clamp(max=W)
-                bb2d[:, 2] = (bb2d[:, 2] - args.bb2d_pad * h).clamp(min=0)
-                bb2d[:, 3] = (bb2d[:, 3] + args.bb2d_pad * h).clamp(max=H)
+                bb2d[:, 0] = (bb2d[:, 0] - pad_x * w).clamp(min=0)
+                bb2d[:, 1] = (bb2d[:, 1] + pad_x * w).clamp(max=W)
+                bb2d[:, 2] = (bb2d[:, 2] - pad_y * h).clamp(min=0)
+                bb2d[:, 3] = (bb2d[:, 3] + pad_y * h).clamp(max=H)
 
         t_owl = timer.stop("owl")
 
