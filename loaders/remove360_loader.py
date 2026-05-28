@@ -517,41 +517,14 @@ class Remove360Loader(BaseLoader):
             torch.tensor([*R_flat, *t_vec], dtype=torch.float32)
         )
 
-        # ── Semi-dense points: Aria-style per-frame visibility ─────────────────
-        # Step 1: COLMAP points that this image observed (track-list lookup).
-        # Step 2: if gsplat dense cloud is loaded, frustum-cull it to this
-        # camera and append. Step 3: budget to sdp_per_frame_budget.
-        budget = self.sdp_per_frame_budget
-        per_frame_chunks: list = []
-
+        # ── Semi-dense points from COLMAP sparse cloud ─────────────────────────
+        # Original behavior: sample up to 10000 points from the global cloud.
+        # (Per-frame visibility + gsplat densification destabilized BoxerNet's
+        # outputs on this data; the global cloud kept lifted OBBs consistent.)
         if self.points3D_w.shape[0] > 0:
-            vis_idx = self.frame_to_pts.get(image_id, np.empty(0, dtype=np.int64))
-            if vis_idx.size > 0:
-                per_frame_chunks.append(self.points3D_w[vis_idx])
-            elif self.gsplat_means_w is None:
-                # Fall back to global cloud (rare: frame with no observed points
-                # and no densification) — better noisy than empty.
-                per_frame_chunks.append(self.points3D_w)
-
-        if self.gsplat_means_w is not None and self.gsplat_means_w.shape[0] > 0:
-            # Frustum-cull gsplat means to this frame using the original
-            # (unscaled) intrinsics: project pts_cam = R_cw @ (pts_w - C_w),
-            # keep those with z > 0 projecting inside the image.
-            R_cw = R_wc_aligned.T  # world→camera
-            pts_cam = (self.gsplat_means_w - C_w_aligned[None, :]) @ R_cw.T
-            z = pts_cam[:, 2]
-            in_front = z > 1e-3
-            u = (cam.fx * pts_cam[:, 0] / np.maximum(z, 1e-6)) + cam.cx
-            v = (cam.fy * pts_cam[:, 1] / np.maximum(z, 1e-6)) + cam.cy
-            in_img = (u >= 0) & (u < cam.width) & (v >= 0) & (v < cam.height)
-            mask = in_front & in_img
-            if np.any(mask):
-                per_frame_chunks.append(self.gsplat_means_w[mask])
-
-        if per_frame_chunks:
-            pts = np.concatenate(per_frame_chunks, axis=0)
-            if pts.shape[0] > budget:
-                idx_sample = np.random.choice(pts.shape[0], budget, replace=False)
+            pts = self.points3D_w
+            if pts.shape[0] > 10000:
+                idx_sample = np.random.choice(pts.shape[0], 10000, replace=False)
                 pts = pts[idx_sample]
             datum["sdp_w"] = torch.from_numpy(pts).float()
         else:
