@@ -162,6 +162,11 @@ def _load_colmap_with_pycolmap(sparse_dir: str):
     """Load COLMAP reconstruction via pycolmap; return a _ColmapSceneManager-shaped object."""
     import pycolmap
 
+    if not hasattr(pycolmap, "Reconstruction"):
+        raise ImportError(
+            f"pycolmap {getattr(pycolmap, '__version__', '?')} lacks Reconstruction; "
+            "need pycolmap>=0.6"
+        )
     rec = pycolmap.Reconstruction(str(sparse_dir))
     mgr = _ColmapSceneManager(sparse_dir)
 
@@ -172,17 +177,22 @@ def _load_colmap_with_pycolmap(sparse_dir: str):
         )
 
     for iid, im in rec.images.items():
-        # cam_from_world is a Rigid3d (rotation as Quaternion + translation Vector3d)
-        r = im.cam_from_world.rotation
-        if hasattr(r, "quat"):
-            q = np.array(r.quat, dtype=np.float64)  # (w,x,y,z)
-            if q.shape[0] == 4 and abs(np.linalg.norm(q) - 1.0) < 1e-3:
-                qvec = q
+        # Newer pycolmap: im.cam_from_world is a Rigid3d property.
+        # Some builds expose it as a method; older builds use im.qvec / im.tvec directly.
+        if hasattr(im, "qvec") and hasattr(im, "tvec"):
+            qvec = np.array(im.qvec, dtype=np.float64)
+            tvec = np.array(im.tvec, dtype=np.float64)
+        else:
+            cfw = im.cam_from_world
+            if callable(cfw):
+                cfw = cfw()
+            r = cfw.rotation
+            if hasattr(r, "quat"):
+                q = np.array(r.quat, dtype=np.float64)
+                qvec = q if q.shape[0] == 4 else np.array([r.w, r.x, r.y, r.z])
             else:
                 qvec = np.array([r.w, r.x, r.y, r.z], dtype=np.float64)
-        else:
-            qvec = np.array([r.w, r.x, r.y, r.z], dtype=np.float64)
-        tvec = np.array(im.cam_from_world.translation, dtype=np.float64)
+            tvec = np.array(cfw.translation, dtype=np.float64)
         mgr.images[iid] = _ColmapImage(iid, qvec, tvec, im.camera_id, im.name)
 
     xyzs = []
@@ -300,7 +310,8 @@ class Remove360Loader(BaseLoader):
         try:
             manager = _load_colmap_with_pycolmap(colmap_dir)
             print(f"==> COLMAP loaded via pycolmap from {colmap_dir}")
-        except (ImportError, ModuleNotFoundError):
+        except (ImportError, ModuleNotFoundError, AttributeError) as e:
+            print(f"==> pycolmap unavailable/incompatible ({e}); using fallback parser")
             manager = _ColmapSceneManager(colmap_dir)
             manager.load_cameras()
             manager.load_images()
