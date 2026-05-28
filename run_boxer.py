@@ -534,21 +534,21 @@ def main():
                 continue
 
             scores2d = 0.5 * torch.ones(bb2d.shape[0])
-        elif args.use_masks:
+        elif args.use_masks and "mask0" in datum:
             # Mask-driven 2D bbox: take the bounding box of foreground pixels.
-            bb2d = torch.zeros(0, 4)
-            scores2d = torch.zeros(0)
-            labels2d = []
-            if "mask0" in datum:
-                mask = datum["mask0"]  # (H, W) float in [0,1]
-                ys, xs = torch.where(mask > 0.5)
-                if ys.numel() > 50:  # ignore degenerate masks
-                    x1, x2 = float(xs.min()), float(xs.max())
-                    y1, y2 = float(ys.min()), float(ys.max())
-                    # boxer format is [x1, x2, y1, y2]
-                    bb2d = torch.tensor([[x1, x2, y1, y2]], dtype=torch.float32)
-                    scores2d = torch.tensor([1.0])
-                    labels2d = [text_labels[0] if text_labels else "object"]
+            mask = datum["mask0"]  # (H, W) float in [0,1]
+            ys, xs = torch.where(mask > 0.5)
+            if ys.numel() > 50:  # ignore degenerate masks
+                x1, x2 = float(xs.min()), float(xs.max())
+                y1, y2 = float(ys.min()), float(ys.max())
+                # boxer format is [x1, x2, y1, y2]
+                bb2d = torch.tensor([[x1, x2, y1, y2]], dtype=torch.float32)
+                scores2d = torch.tensor([1.0])
+                labels2d = [text_labels[0] if text_labels else "object"]
+            else:
+                bb2d = torch.zeros(0, 4)
+                scores2d = torch.zeros(0)
+                labels2d = []
         else:
             img_torch_255 = img_torch.clone() * 255.0
             bb2d, scores2d, label_ints, _ = owl.forward(
