@@ -1,7 +1,3 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# This source code is licensed under the CC-BY-NC 4.0 license found in the
-# LICENSE file in the root directory of this source tree.
-
 """
 Loader for Remove360 sequences that have been processed with COLMAP.
 
@@ -29,11 +25,9 @@ from utils.tw.obb import ObbTW
 from utils.tw.pose import PoseTW
 
 
-# ── Minimal COLMAP binary parser (drop-in replacement for pycolmap.SceneManager) ──
-# pycolmap on PyPI doesn't expose scene_manager.SceneManager, and the True-Price
-# fork isn't always installable. This in-loader parser reads cameras.bin /
-# images.bin / points3D.bin directly and exposes the same .images / .cameras /
-# .points3D interface the loader expects.
+# COLMAP loading: primary path uses pycolmap (`pycolmap.Reconstruction`), which
+# is the maintained C++-backed reader. The minimal binary parser below is kept
+# as a fallback for environments without pycolmap installed.
 
 _COLMAP_CAMERA_MODELS = {
     0: ("SIMPLE_PINHOLE", 3),
@@ -100,8 +94,8 @@ class _ColmapSceneManager:
 
     def __init__(self, sparse_dir):
         self.sparse_dir = sparse_dir
-        self.images = {}     # image_id → _ColmapImage
-        self.cameras = {}    # camera_id → _ColmapCamera
+        self.images = {}     # image_id: _ColmapImage
+        self.cameras = {}    # camera_id: _ColmapCamera
         self.points3D = np.zeros((0, 3), dtype=np.float64)
 
     def load_cameras(self):
@@ -142,8 +136,10 @@ class _ColmapSceneManager:
         path = os.path.join(self.sparse_dir, "points3D.bin")
         if not os.path.exists(path):
             self.points3D = np.zeros((0, 3), dtype=np.float64)
+            self.point_image_ids = []
             return
         xyzs = []
+        tracks = []  # per-point list of image_ids that observed it
         with open(path, "rb") as f:
             n = struct.unpack("<Q", f.read(8))[0]
             for _ in range(n):
@@ -152,8 +148,53 @@ class _ColmapSceneManager:
                 f.read(3)                                        # rgb
                 f.read(8)                                        # error
                 tl = struct.unpack("<Q", f.read(8))[0]
-                f.seek(tl * (4 + 4), 1)                          # track entries
+                track_image_ids = []
+                for _ in range(tl):
+                    iid = struct.unpack("<I", f.read(4))[0]
+                    f.read(4)  # point2D_idx
+                    track_image_ids.append(iid)
+                tracks.append(track_image_ids)
         self.points3D = np.array(xyzs, dtype=np.float64)
+        self.point_image_ids = tracks
+
+
+def _load_colmap_with_pycolmap(sparse_dir: str):
+    """Load COLMAP reconstruction via pycolmap; return a _ColmapSceneManager-shaped object."""
+    import pycolmap
+
+    rec = pycolmap.Reconstruction(str(sparse_dir))
+    mgr = _ColmapSceneManager(sparse_dir)
+
+    for cid, c in rec.cameras.items():
+        model_name = c.model.name if hasattr(c.model, "name") else str(c.model)
+        mgr.cameras[cid] = _ColmapCamera(
+            cid, model_name, c.width, c.height, np.array(c.params, dtype=np.float64)
+        )
+
+    for iid, im in rec.images.items():
+        # cam_from_world is a Rigid3d (rotation as Quaternion + translation Vector3d)
+        r = im.cam_from_world.rotation
+        if hasattr(r, "quat"):
+            q = np.array(r.quat, dtype=np.float64)  # (w,x,y,z)
+            if q.shape[0] == 4 and abs(np.linalg.norm(q) - 1.0) < 1e-3:
+                qvec = q
+            else:
+                qvec = np.array([r.w, r.x, r.y, r.z], dtype=np.float64)
+        else:
+            qvec = np.array([r.w, r.x, r.y, r.z], dtype=np.float64)
+        tvec = np.array(im.cam_from_world.translation, dtype=np.float64)
+        mgr.images[iid] = _ColmapImage(iid, qvec, tvec, im.camera_id, im.name)
+
+    xyzs = []
+    tracks = []
+    for _, p in rec.points3D.items():
+        xyzs.append(np.array(p.xyz, dtype=np.float64))
+        tracks.append([el.image_id for el in p.track.elements])
+    mgr.points3D = (
+        np.stack(xyzs, axis=0) if xyzs else np.zeros((0, 3), dtype=np.float64)
+    )
+    mgr.point_image_ids = tracks
+    return mgr
 
 
 def _quat_wxyz_to_rotation(q_wxyz: np.ndarray) -> np.ndarray:
@@ -231,6 +272,8 @@ class Remove360Loader(BaseLoader):
         max_frames: Optional[int] = None,
         start_frame: int = 0,
         use_masks: bool = False,
+        gsplat_ckpt: Optional[str] = None,
+        sdp_per_frame_budget: int = 20000,
     ):
         seq_dir = os.path.expanduser(seq_dir)
         if not os.path.isabs(seq_dir) and not os.path.exists(seq_dir):
@@ -252,10 +295,17 @@ class Remove360Loader(BaseLoader):
             )
 
         # ── Load COLMAP cameras and images ─────────────────────────────────────
-        manager = _ColmapSceneManager(colmap_dir)
-        manager.load_cameras()
-        manager.load_images()
-        manager.load_points3D()
+        # Prefer pycolmap (maintained, C++-backed). Fall back to the in-loader
+        # binary parser if pycolmap isn't installed.
+        try:
+            manager = _load_colmap_with_pycolmap(colmap_dir)
+            print(f"==> COLMAP loaded via pycolmap from {colmap_dir}")
+        except (ImportError, ModuleNotFoundError):
+            manager = _ColmapSceneManager(colmap_dir)
+            manager.load_cameras()
+            manager.load_images()
+            manager.load_points3D()
+            print(f"==> COLMAP loaded via fallback parser from {colmap_dir}")
 
         # Sort images by filename for deterministic ordering
         sorted_image_ids = sorted(
@@ -289,7 +339,7 @@ class Remove360Loader(BaseLoader):
         self.world_offset = (-first_R.T @ first_t).astype(np.float32)  # cam center
 
         # ── Gravity alignment ─────────────────────────────────────────────────
-        # BoxerNet assumes gravity = [0, 0, -1] in world space (VIO convention).
+        # BoxerNet assumes gravity = [0, 0, -1] in world space.
         # We rotate the entire COLMAP world so that the estimated gravity maps to
         # [0, 0, -1], making BoxerNet's default assumption correct.
         gravity_est = _estimate_gravity_colmap(manager.images)
@@ -304,6 +354,50 @@ class Remove360Loader(BaseLoader):
             self.points3D_w = (self.R_fix @ pts.T).T
         else:
             self.points3D_w = np.zeros((0, 3), dtype=np.float32)
+
+        # ── Per-frame visibility: image_id - point indices.
+        # COLMAP stores which images observed each 3D point in its track list.
+        # Feeding BoxerNet only the points actually observed in the current
+        # frame mimics Aria's per-timestamp SDP subset (denser locally,
+        # cleaner globally) and is closer to its training distribution.
+        self.frame_to_pts: dict = {iid: [] for iid in manager.images.keys()}
+        for pt_idx, track in enumerate(manager.point_image_ids):
+            for iid in track:
+                if iid in self.frame_to_pts:
+                    self.frame_to_pts[iid].append(pt_idx)
+        self.frame_to_pts = {
+            iid: np.array(v, dtype=np.int64) for iid, v in self.frame_to_pts.items()
+        }
+
+        # ── Optional gsplat densification ─────────────────────────────────────
+        # COLMAP sparse is ~150k points scene-wide; gsplat checkpoints store
+        # millions of gaussian means. Loading them gives a much denser cloud
+        # closer to Aria's semi-dense density. Per-frame frustum culling in
+        # load() keeps only gaussians visible from the current camera.
+        self.sdp_per_frame_budget = int(sdp_per_frame_budget)
+        self.gsplat_means_w = None  # (N, 3) float32 in aligned world frame
+        if gsplat_ckpt is None:
+            # Auto-discover: $seq_dir/gsplat_results/ckpts/ckpt_*.pt (latest)
+            import glob
+            candidates = sorted(
+                glob.glob(os.path.join(seq_dir, "gsplat_results", "ckpts", "ckpt_*.pt"))
+            )
+            if candidates:
+                gsplat_ckpt = candidates[-1]
+        if gsplat_ckpt is not None and os.path.exists(gsplat_ckpt):
+            try:
+                ckpt = torch.load(gsplat_ckpt, map_location="cpu", weights_only=False)
+                splats = ckpt.get("splats", ckpt)
+                means = splats["means"] if "means" in splats else splats["means3d"]
+                means_np = means.detach().cpu().numpy().astype(np.float32)
+                means_np = means_np - self.world_offset
+                self.gsplat_means_w = (self.R_fix @ means_np.T).T.astype(np.float32)
+                print(
+                    f"==> Loaded gsplat densification: {self.gsplat_means_w.shape[0]} "
+                    f"gaussians from {os.path.basename(gsplat_ckpt)}"
+                )
+            except Exception as e:
+                print(f"==> gsplat ckpt found but failed to load ({e}); using COLMAP only")
 
         print(
             f"Remove360Loader: {os.path.basename(seq_dir)}, "
@@ -412,14 +506,41 @@ class Remove360Loader(BaseLoader):
             torch.tensor([*R_flat, *t_vec], dtype=torch.float32)
         )
 
-        # ── Semi-dense points from COLMAP sparse cloud ─────────────────────────
-        # Sample up to 10000 points visible in this frame (or all if fewer)
+        # ── Semi-dense points: Aria-style per-frame visibility ─────────────────
+        # Step 1: COLMAP points that this image observed (track-list lookup).
+        # Step 2: if gsplat dense cloud is loaded, frustum-cull it to this
+        # camera and append. Step 3: budget to sdp_per_frame_budget.
+        budget = self.sdp_per_frame_budget
+        per_frame_chunks: list = []
+
         if self.points3D_w.shape[0] > 0:
-            # Use all reconstructed points (no per-image visibility filtering to
-            # keep it simple; Boxer handles noisy / behind-camera points)
-            pts = self.points3D_w
-            if pts.shape[0] > 10000:
-                idx_sample = np.random.choice(pts.shape[0], 10000, replace=False)
+            vis_idx = self.frame_to_pts.get(image_id, np.empty(0, dtype=np.int64))
+            if vis_idx.size > 0:
+                per_frame_chunks.append(self.points3D_w[vis_idx])
+            elif self.gsplat_means_w is None:
+                # Fall back to global cloud (rare: frame with no observed points
+                # and no densification) — better noisy than empty.
+                per_frame_chunks.append(self.points3D_w)
+
+        if self.gsplat_means_w is not None and self.gsplat_means_w.shape[0] > 0:
+            # Frustum-cull gsplat means to this frame using the original
+            # (unscaled) intrinsics: project pts_cam = R_cw @ (pts_w - C_w),
+            # keep those with z > 0 projecting inside the image.
+            R_cw = R_wc_aligned.T  # world→camera
+            pts_cam = (self.gsplat_means_w - C_w_aligned[None, :]) @ R_cw.T
+            z = pts_cam[:, 2]
+            in_front = z > 1e-3
+            u = (cam.fx * pts_cam[:, 0] / np.maximum(z, 1e-6)) + cam.cx
+            v = (cam.fy * pts_cam[:, 1] / np.maximum(z, 1e-6)) + cam.cy
+            in_img = (u >= 0) & (u < cam.width) & (v >= 0) & (v < cam.height)
+            mask = in_front & in_img
+            if np.any(mask):
+                per_frame_chunks.append(self.gsplat_means_w[mask])
+
+        if per_frame_chunks:
+            pts = np.concatenate(per_frame_chunks, axis=0)
+            if pts.shape[0] > budget:
+                idx_sample = np.random.choice(pts.shape[0], budget, replace=False)
                 pts = pts[idx_sample]
             datum["sdp_w"] = torch.from_numpy(pts).float()
         else:

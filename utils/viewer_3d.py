@@ -4630,6 +4630,32 @@ class TrackerViewer(SequenceOBBViewer):
             print(f"Loaded {self.point_count} semidense points from CALoader.sdp_ws")
             return
 
+        if getattr(self, "_data_source", None) == "remove360":
+            # COLMAP sparse 3D points; already gravity-aligned by Remove360Loader.
+            loader = getattr(self, "_loader", None)
+            sdp = getattr(loader, "points3D_w", None) if loader is not None else None
+            if sdp is None or len(sdp) == 0:
+                print("No semidense points found in Remove360Loader.points3D_w")
+                return
+            positions = np.asarray(sdp, dtype=np.float32)
+            self._point_positions = positions
+            self.point_count = len(positions)
+            self.show_global_points = True
+            self.show_obs_points = False
+
+            colors = np.full((self.point_count, 3), 0.25, dtype=np.float32)
+            vertex_data = np.hstack([positions, colors]).astype(np.float32)
+            self.point_vbo = self.ctx.buffer(vertex_data.tobytes())
+            self.point_vao = self.ctx.vertex_array(
+                self.point_prog,
+                [(self.point_vbo, "3f 3f", "in_position", "in_color")],
+            )
+            print(
+                f"Loaded {self.point_count} semidense points from "
+                f"Remove360Loader.points3D_w"
+            )
+            return
+
         # Prefer semidense from AriaLoader context only.
         time_to_uids_slaml = getattr(self, "_aria_time_to_uids_slaml", None)
         time_to_uids_slamr = getattr(self, "_aria_time_to_uids_slamr", None)
