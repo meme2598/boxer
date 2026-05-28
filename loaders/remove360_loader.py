@@ -282,8 +282,6 @@ class Remove360Loader(BaseLoader):
         max_frames: Optional[int] = None,
         start_frame: int = 0,
         use_masks: bool = False,
-        gsplat_ckpt: Optional[str] = None,
-        sdp_per_frame_budget: int = 20000,
     ):
         seq_dir = os.path.expanduser(seq_dir)
         if not os.path.isabs(seq_dir) and not os.path.exists(seq_dir):
@@ -375,36 +373,6 @@ class Remove360Loader(BaseLoader):
         self.frame_to_pts = {
             iid: np.array(v, dtype=np.int64) for iid, v in self.frame_to_pts.items()
         }
-
-        # ── Optional gsplat densification ─────────────────────────────────────
-        # COLMAP sparse is ~150k points scene-wide; gsplat checkpoints store
-        # millions of gaussian means. Loading them gives a much denser cloud
-        # closer to Aria's semi-dense density. Per-frame frustum culling in
-        # load() keeps only gaussians visible from the current camera.
-        self.sdp_per_frame_budget = int(sdp_per_frame_budget)
-        self.gsplat_means_w = None  # (N, 3) float32 in aligned world frame
-        if gsplat_ckpt is None:
-            # Auto-discover: $seq_dir/gsplat_results/ckpts/ckpt_*.pt (latest)
-            import glob
-            candidates = sorted(
-                glob.glob(os.path.join(seq_dir, "gsplat_results", "ckpts", "ckpt_*.pt"))
-            )
-            if candidates:
-                gsplat_ckpt = candidates[-1]
-        if gsplat_ckpt is not None and os.path.exists(gsplat_ckpt):
-            try:
-                ckpt = torch.load(gsplat_ckpt, map_location="cpu", weights_only=False)
-                splats = ckpt.get("splats", ckpt)
-                means = splats["means"] if "means" in splats else splats["means3d"]
-                means_np = means.detach().cpu().numpy().astype(np.float32)
-                means_np = means_np - self.world_offset
-                self.gsplat_means_w = (self.R_fix @ means_np.T).T.astype(np.float32)
-                print(
-                    f"==> Loaded gsplat densification: {self.gsplat_means_w.shape[0]} "
-                    f"gaussians from {os.path.basename(gsplat_ckpt)}"
-                )
-            except Exception as e:
-                print(f"==> gsplat ckpt found but failed to load ({e}); using COLMAP only")
 
         print(
             f"Remove360Loader: {os.path.basename(seq_dir)}, "
