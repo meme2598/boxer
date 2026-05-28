@@ -143,7 +143,6 @@ def main():
     parser.add_argument("--no_csv", action="store_true", help="skip CSV writing")
     parser.add_argument("--force_cpu", action="store_true", help="force CPU")
     parser.add_argument("--gt2d", action="store_true", help="use GT pseudo 2DBB as input")
-    parser.add_argument("--use_masks", action="store_true", help="derive 2D boxes from per-frame masks (Remove360) instead of OWL — uses ground-truth-quality crops")
     parser.add_argument("--bb2d_pad", type=float, default=0.0, help="fractional padding added to OWL 2D boxes before BoxerNet lifting (symmetric, e.g. 0.15 = +15%% on each side)")
     parser.add_argument("--bb2d_pad_x", type=float, default=None, help="override --bb2d_pad for horizontal padding (e.g. 0.4 = +40%% width on each side)")
     parser.add_argument("--bb2d_pad_y", type=float, default=None, help="override --bb2d_pad for vertical padding")
@@ -284,7 +283,6 @@ def main():
             skip_frames=args.skip_n,
             max_frames=args.max_n,
             start_frame=args.start_n - 1,
-            use_masks=args.use_masks,
         )
     else:
         from loaders.aria_loader import AriaLoader
@@ -338,9 +336,6 @@ def main():
         method = "CACHED"
     elif args.gt2d:
         method = "GT2D"
-    elif args.use_masks:
-        method = "MASKS"
-        print("==> Using per-frame masks as 2D detector (skipping OWL)")
     else:
         from owl.owl_wrapper import OwlWrapper
 
@@ -534,21 +529,6 @@ def main():
                 continue
 
             scores2d = 0.5 * torch.ones(bb2d.shape[0])
-        elif args.use_masks and "mask0" in datum:
-            # Mask-driven 2D bbox: take the bounding box of foreground pixels.
-            mask = datum["mask0"]  # (H, W) float in [0,1]
-            ys, xs = torch.where(mask > 0.5)
-            if ys.numel() > 50:  # ignore degenerate masks
-                x1, x2 = float(xs.min()), float(xs.max())
-                y1, y2 = float(ys.min()), float(ys.max())
-                # boxer format is [x1, x2, y1, y2]
-                bb2d = torch.tensor([[x1, x2, y1, y2]], dtype=torch.float32)
-                scores2d = torch.tensor([1.0])
-                labels2d = [text_labels[0] if text_labels else "object"]
-            else:
-                bb2d = torch.zeros(0, 4)
-                scores2d = torch.zeros(0)
-                labels2d = []
         else:
             img_torch_255 = img_torch.clone() * 255.0
             bb2d, scores2d, label_ints, _ = owl.forward(
