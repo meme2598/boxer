@@ -307,16 +307,12 @@ class Remove360Loader(BaseLoader):
         # ── Load COLMAP cameras and images ─────────────────────────────────────
         # Prefer pycolmap (maintained, C++-backed). Fall back to the in-loader
         # binary parser if pycolmap isn't installed.
-        try:
-            manager = _load_colmap_with_pycolmap(colmap_dir)
-            print(f"==> COLMAP loaded via pycolmap from {colmap_dir}")
-        except (ImportError, ModuleNotFoundError, AttributeError) as e:
-            print(f"==> pycolmap unavailable/incompatible ({e}); using fallback parser")
-            manager = _ColmapSceneManager(colmap_dir)
-            manager.load_cameras()
-            manager.load_images()
-            manager.load_points3D()
-            print(f"==> COLMAP loaded via fallback parser from {colmap_dir}")
+        # Forced fallback (binary parser) — known-good before any pycolmap edits.
+        manager = _ColmapSceneManager(colmap_dir)
+        manager.load_cameras()
+        manager.load_images()
+        manager.load_points3D()
+        print(f"==> COLMAP loaded via binary parser from {colmap_dir}")
 
         # Sort images by filename for deterministic ordering
         sorted_image_ids = sorted(
